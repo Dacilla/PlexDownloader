@@ -18,13 +18,41 @@ const PLEX_TV_URL = 'https://plex.tv';
 const PLEX_CLIENT_IDENTIFIER = 'com.plexdownloader.mobile';
 const PLEX_PRODUCT_NAME = 'PlexDownloader';
 const PLEX_VERSION = '1.0.0';
+const TOKEN_EXPIRY_BUFFER_MS = 86400000; // 24 hours
 
 /**
  * Censors the Plex token from a URL string for safe logging.
  */
 function censorToken(url: string | undefined): string {
   if (!url) return 'URL undefined';
-  return url.replace(/X-Plex-Token=([^&]+)/g, 'X-Plex-Token=REDACTED');
+  return url.replace(/X-Plex-Token=([^&\s]+)/gi, 'X-Plex-Token=REDACTED');
+}
+
+/**
+ * Censors tokens from error objects for safe logging.
+ */
+function censorErrorObject(error: any): any {
+  if (!error) return error;
+  
+  const censored = { ...error };
+  
+  if (censored.config?.url) {
+    censored.config.url = censorToken(censored.config.url);
+  }
+  if (censored.config?.headers?.['X-Plex-Token']) {
+    censored.config.headers['X-Plex-Token'] = 'REDACTED';
+  }
+  if (censored.response?.config?.url) {
+    censored.response.config.url = censorToken(censored.response.config.url);
+  }
+  if (censored.response?.request?.responseURL) {
+    censored.response.request.responseURL = censorToken(censored.response.request.responseURL);
+  }
+  if (censored.message) {
+    censored.message = censorToken(censored.message);
+  }
+  
+  return censored;
 }
 
 /**
@@ -40,14 +68,21 @@ function isLocalIp(address: string): boolean {
   );
 }
 
+interface TokenInfo {
+  token: string;
+  expiresAt: number;
+}
+
 class PlexClient {
   private axiosInstance: AxiosInstance;
-  private userToken: string | null = null;
+  private userTokenInfo: TokenInfo | null = null;
   
   private activeServer: PlexServer | null = null;
   private activeServerUrl: string | null = null;
   private activeServerToken: string | null = null;
   private activeServerDownloadUrl: string | null = null;
+  
+  private imageUrlCache: Map<string, string> = new Map();
 
   constructor() {
     this.axiosInstance = axios.create({
@@ -64,8 +99,8 @@ class PlexClient {
 
       if (this.activeServerUrl && this.activeServerToken && config.url?.startsWith(this.activeServerUrl)) {
         config.headers['X-Plex-Token'] = this.activeServerToken;
-      } else if (config.url?.includes('plex.tv') && this.userToken) {
-        config.headers['X-Plex-Token'] = this.userToken;
+      } else if (config.url?.includes('plex.tv') && this.userTokenInfo) {
+        config.headers['X-Plex-Token'] = this.userTokenInfo.token;
       }
       
       console.log(`Request: ${config.method?.toUpperCase()} ${censorToken(config.url)}`);
@@ -92,17 +127,34 @@ class PlexClient {
         } else {
           console.error('Request setup error:', error.message);
         }
+        
+        const censoredError = censorErrorObject(error);
+        console.error('Error details:', JSON.stringify(censoredError, null, 2));
         return Promise.reject(error);
       }
     );
   }
 
   setUserToken(token: string): void {
-    this.userToken = token;
+    this.userTokenInfo = {
+      token,
+      expiresAt: Date.now() + TOKEN_EXPIRY_BUFFER_MS
+    };
   }
 
   getUserToken(): string | null {
-    return this.userToken;
+    if (!this.userTokenInfo) return null;
+    
+    if (Date.now() > this.userTokenInfo.expiresAt) {
+      console.warn('User token may be expired');
+    }
+    
+    return this.userTokenInfo.token;
+  }
+  
+  isTokenExpired(): boolean {
+    if (!this.userTokenInfo) return true;
+    return Date.now() > this.userTokenInfo.expiresAt;
   }
   
   getActiveServerToken(): string | null {
@@ -114,6 +166,7 @@ class PlexClient {
     this.activeServerUrl = this.getBestConnectionUri(server.connections, false);
     this.activeServerDownloadUrl = this.getBestConnectionUri(server.connections, true);
     this.activeServerToken = server.accessToken;
+    this.imageUrlCache.clear();
   }
 
   clearActiveServer(): void {
@@ -121,10 +174,15 @@ class PlexClient {
     this.activeServerUrl = null;
     this.activeServerDownloadUrl = null;
     this.activeServerToken = null;
+    this.imageUrlCache.clear();
   }
 
   getActiveServerUrl(): string | null {
     return this.activeServerUrl;
+  }
+  
+  getActiveServer(): PlexServer | null {
+    return this.activeServer;
   }
 
   private getBestConnectionUri(connections: PlexConnection[], forDownload: boolean): string {
@@ -151,13 +209,40 @@ class PlexClient {
     return connections[0]?.uri || '';
   }
   
-  // **NEW**: Function to get a transcoded image URL for performance.
+  async validateServerConnection(server: PlexServer): Promise<boolean> {
+    const testUrl = this.getBestConnectionUri(server.connections, false);
+    try {
+      const response = await this.axiosInstance.get(`${testUrl}/`, {
+        timeout: 5000,
+        headers: { 'X-Plex-Token': server.accessToken }
+      });
+      return response.status === 200;
+    } catch (error) {
+      console.error(`Failed to validate connection to ${testUrl}:`, error);
+      return false;
+    }
+  }
+  
   getTranscodedImageUrl(path: string, width: number, height: number): string | undefined {
     if (!this.activeServerUrl || !this.activeServerToken) {
         return undefined;
     }
+    
+    if (!path || path.trim() === '') {
+      console.warn('[PlexClient] Attempted to transcode empty image path');
+      return undefined;
+    }
+    
+    const cacheKey = `${path}-${width}x${height}`;
+    if (this.imageUrlCache.has(cacheKey)) {
+      return this.imageUrlCache.get(cacheKey);
+    }
+    
     const encodedUrl = encodeURIComponent(path);
-    return `${this.activeServerUrl}/photo/:/transcode?url=${encodedUrl}&width=${width}&height=${height}&minSize=1&X-Plex-Token=${this.activeServerToken}`;
+    const url = `${this.activeServerUrl}/photo/:/transcode?url=${encodedUrl}&width=${width}&height=${height}&minSize=1&X-Plex-Token=${this.activeServerToken}`;
+    
+    this.imageUrlCache.set(cacheKey, url);
+    return url;
   }
 
   async createAuthPin(): Promise<PlexPin> {
@@ -258,4 +343,3 @@ class PlexClient {
 
 export const plexClient = new PlexClient();
 export default plexClient;
-

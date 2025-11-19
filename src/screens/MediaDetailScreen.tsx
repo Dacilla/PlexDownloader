@@ -1,14 +1,14 @@
 /**
- * Media List Screen
- * Fetches and displays all media items within a selected library.
+ * Media Detail Screen
+ * Shows detailed information about a media item and download options.
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { StyleSheet, Text, View, Pressable, ScrollView, ActivityIndicator, Image, Dimensions } from 'react-native';
 import { PlexServer, PlexMediaBase, PlexMovie } from '../types/plex';
 import plexClient from '../api/plexClient';
 import { formatBytes } from '../utils/formatters';
 import StorageInfo from '../components/StorageInfo';
-import * as FileSystem from 'expo-file-system/legacy'; // Use legacy import to avoid deprecation errors
+import * as FileSystem from 'expo-file-system/legacy';
 
 interface MediaDetailScreenProps {
   activeServer: PlexServer;
@@ -35,10 +35,33 @@ export default function MediaDetailScreen({
     fetchStorage();
   }, [selectedMedia]);
 
+  const headerImageUrl = useMemo(() => {
+    if (!details) return undefined;
+    const imagePath = details.art || details.thumb;
+    if (!imagePath) return undefined;
+    
+    const serverUrl = plexClient.getActiveServerUrl();
+    const token = plexClient.getActiveServerToken();
+    if (!serverUrl || !token) return undefined;
+    
+    return `${serverUrl}${imagePath}?X-Plex-Token=${token}`;
+  }, [details]);
+  
+  const storageWarningMessage = useMemo(() => {
+    if (!details) return null;
+    const mediaSize = details.Media?.[0]?.Part?.[0]?.size || 0;
+    const hasEnoughSpace = freeSpace !== null && freeSpace > mediaSize;
+    
+    if (hasEnoughSpace || freeSpace === null) return null;
+    const deficit = mediaSize - freeSpace;
+    return `Not enough storage. You need ${formatBytes(deficit)} more space.`;
+  }, [details, freeSpace]);
+
   const fetchMediaDetails = async () => {
     try {
       setIsLoading(true);
       setError(null);
+      console.log('[MediaDetailScreen] Fetching details for:', selectedMedia.ratingKey);
       const response = await plexClient.getMediaMetadata(selectedMedia.ratingKey);
       const mediaDetails = response.MediaContainer.Metadata?.[0] as PlexMovie;
       if (mediaDetails) {
@@ -47,8 +70,8 @@ export default function MediaDetailScreen({
         setError("Could not find details for this item.");
       }
     } catch (err) {
-      setError("Failed to fetch media details. Please try again.");
-      console.error(err);
+      console.error('[MediaDetailScreen] Failed to fetch media details:', err);
+      setError("Failed to fetch media details. Please check your connection and try again.");
     } finally {
       setIsLoading(false);
     }
@@ -59,16 +82,8 @@ export default function MediaDetailScreen({
       const free = await FileSystem.getFreeDiskStorageAsync();
       setFreeSpace(free);
     } catch (e) {
-      console.error('Failed to get free disk space', e);
+      console.error('[MediaDetailScreen] Failed to get free disk space:', e);
     }
-  };
-
-  const getImageUrl = (imagePath?: string): string | undefined => {
-    if (!imagePath) return undefined;
-    const serverUrl = plexClient.getActiveServerUrl();
-    const token = plexClient.getActiveServerToken();
-    if (!serverUrl || !token) return undefined;
-    return `${serverUrl}${imagePath}?X-Plex-Token=${token}`;
   };
 
   if (isLoading) {
@@ -97,7 +112,7 @@ export default function MediaDetailScreen({
     <ScrollView style={styles.scrollView}>
       <View style={styles.headerImageContainer}>
         <Image
-          source={{ uri: getImageUrl(details.art || details.thumb) }}
+          source={{ uri: headerImageUrl }}
           style={styles.headerImage}
           resizeMode="cover"
         />
@@ -105,7 +120,6 @@ export default function MediaDetailScreen({
         <Pressable style={styles.backButtonContainer} onPress={onBack}>
           <Text style={styles.backButtonText}>{'< Back'}</Text>
         </Pressable>
-        {/* **FIX:** New container for text to handle padding correctly */}
         <View style={styles.headerTextContainer}>
           <Text style={styles.title}>{details.title}</Text>
           <Text style={styles.subtitle}>{details.year} • {Math.round(details.duration / 60000)} min</Text>
@@ -125,8 +139,8 @@ export default function MediaDetailScreen({
             <Text style={styles.downloadButtonText}>Download Original Quality</Text>
             <Text style={styles.downloadButtonSubtitle}>Size: {formatBytes(mediaSize)}</Text>
           </Pressable>
-          {!hasEnoughSpace && (
-             <Text style={styles.storageWarning}>Not enough storage available.</Text>
+          {storageWarningMessage && (
+             <Text style={styles.storageWarning}>{storageWarningMessage}</Text>
           )}
         </View>
       </View>
@@ -251,4 +265,3 @@ const styles = StyleSheet.create({
     marginTop: 20,
   },
 });
-

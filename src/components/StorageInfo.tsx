@@ -1,33 +1,55 @@
 /**
  * StorageInfo Component
  * Fetches and displays the device's total and available storage space.
+ * Now with caching and proper error handling.
  */
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
-import * as FileSystem from 'expo-file-system/legacy'; // Use legacy import to avoid deprecation errors
+import * as FileSystem from 'expo-file-system/legacy';
 import { formatBytes } from '../utils/formatters';
+
+const CACHE_DURATION_MS = 30000;
+
+let cachedStorageInfo: { total: number; free: number; timestamp: number } | null = null;
 
 export default function StorageInfo() {
   const [totalSpace, setTotalSpace] = useState<number | null>(null);
   const [freeSpace, setFreeSpace] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchStorageInfo = async () => {
-      try {
-        const total = await FileSystem.getTotalDiskCapacityAsync();
-        const free = await FileSystem.getFreeDiskStorageAsync();
-        setTotalSpace(total);
-        setFreeSpace(free);
-      } catch (error) {
-        console.error("Failed to get storage information:", error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
     fetchStorageInfo();
   }, []);
+
+  const fetchStorageInfo = async () => {
+    const now = Date.now();
+    
+    if (cachedStorageInfo && (now - cachedStorageInfo.timestamp) < CACHE_DURATION_MS) {
+      console.log('[StorageInfo] Using cached storage info');
+      setTotalSpace(cachedStorageInfo.total);
+      setFreeSpace(cachedStorageInfo.free);
+      setIsLoading(false);
+      return;
+    }
+    
+    try {
+      console.log('[StorageInfo] Fetching storage info...');
+      const total = await FileSystem.getTotalDiskCapacityAsync();
+      const free = await FileSystem.getFreeDiskStorageAsync();
+      
+      cachedStorageInfo = { total, free, timestamp: now };
+      
+      setTotalSpace(total);
+      setFreeSpace(free);
+      setError(null);
+    } catch (error) {
+      console.error('[StorageInfo] Failed to get storage information:', error);
+      setError('Unable to retrieve storage information');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -37,8 +59,12 @@ export default function StorageInfo() {
     );
   }
 
-  if (totalSpace === null || freeSpace === null) {
-    return null; // Don't render if we couldn't get the info
+  if (error || totalSpace === null || freeSpace === null) {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.errorText}>{error || 'Storage info unavailable'}</Text>
+      </View>
+    );
   }
 
   const usedSpace = totalSpace - freeSpace;
@@ -85,5 +111,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#e5a00d',
     borderRadius: 4,
   },
+  errorText: {
+    color: '#ff4444',
+    fontSize: 12,
+    textAlign: 'center',
+  },
 });
-

@@ -2,7 +2,7 @@
  * Media List Screen
  * Fetches and displays all media items within a selected library with search, sort, and filter.
  */
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { StyleSheet, Text, View, Pressable, FlatList, ActivityIndicator, TextInput } from 'react-native';
 import { PlexServer, PlexLibrary, PlexMediaBase, PlexMovie, PlexShow } from '../types/plex';
 import plexClient from '../api/plexClient';
@@ -17,8 +17,19 @@ const SORT_OPTIONS = {
 };
 type SortOption = keyof typeof SORT_OPTIONS;
 
+interface MediaListScreenProps {
+  activeServer: PlexServer;
+  selectedLibrary: PlexLibrary;
+  onChangeLibrary: () => void;
+  onSelectMedia: (media: PlexMediaBase) => void;
+}
+
 const MediaItem = React.memo(({ item, onSelectMedia }: { item: PlexMediaBase, onSelectMedia: (media: PlexMediaBase) => void }) => {
-  const thumbnailUrl = item.thumb ? plexClient.getTranscodedImageUrl(item.thumb, 200, 300) : undefined;
+  const thumbnailUrl = useMemo(() => {
+    if (!item.thumb) return undefined;
+    const url = plexClient.getTranscodedImageUrl(item.thumb, 200, 300);
+    return url;
+  }, [item.thumb]);
 
   const isMovie = item.type === 'movie';
   const movieItem = item as PlexMovie;
@@ -56,6 +67,7 @@ export default function MediaListScreen({
   const [error, setError] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const [totalSize, setTotalSize] = useState<number | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -75,12 +87,22 @@ export default function MediaListScreen({
     setMediaItems([]);
     setOffset(0);
     setHasMore(true);
+    setTotalSize(null);
     loadingRef.current = false;
     fetchMediaItems(0, true);
   }, [selectedLibrary, debouncedQuery, sortOption, sortDirection, filterUnwatched]);
 
   const fetchMediaItems = async (currentOffset: number, isInitialLoad = false) => {
-    if (loadingRef.current || !hasMore) return;
+    if (loadingRef.current) {
+      console.log('[MediaListScreen] Load already in progress, skipping');
+      return;
+    }
+    
+    if (!isInitialLoad && !hasMore) {
+      console.log('[MediaListScreen] No more items to load');
+      return;
+    }
+    
     loadingRef.current = true;
 
     if (isInitialLoad) setIsLoading(true); else setIsLoadingMore(true);
@@ -90,6 +112,8 @@ export default function MediaListScreen({
       const sortKey = SORT_OPTIONS[sortOption].key;
       const sortValue = `${sortKey}:${sortDirection}`;
       
+      console.log(`[MediaListScreen] Fetching items: offset=${currentOffset}, limit=${PAGE_SIZE}, sort=${sortValue}`);
+      
       const response = await plexClient.getLibrarySectionItems({
         sectionId: selectedLibrary.key,
         offset: currentOffset,
@@ -98,16 +122,41 @@ export default function MediaListScreen({
         title: debouncedQuery,
         unwatched: filterUnwatched,
       });
-      const items = response.MediaContainer.Metadata || [];
       
-      if (isInitialLoad && items.length === 0) setError("No items found.");
-      if (items.length < PAGE_SIZE) setHasMore(false);
+      const items = response.MediaContainer.Metadata || [];
+      const totalItemsInLibrary = response.MediaContainer.totalSize || response.MediaContainer.size;
+      
+      console.log(`[MediaListScreen] Received ${items.length} items, total in library: ${totalItemsInLibrary}, current offset: ${currentOffset}`);
+      
+      if (isInitialLoad) {
+        setTotalSize(totalItemsInLibrary);
+        if (items.length === 0) {
+          setError("No items found.");
+          setHasMore(false);
+        } else {
+          const willHaveMore = (currentOffset + items.length) < totalItemsInLibrary;
+          setHasMore(willHaveMore);
+          console.log(`[MediaListScreen] Initial load: ${items.length} items, hasMore: ${willHaveMore}`);
+        }
+      } else {
+        const newTotalLoaded = currentOffset + items.length;
+        if (newTotalLoaded >= totalItemsInLibrary) {
+          setHasMore(false);
+          console.log('[MediaListScreen] All items loaded');
+        } else if (items.length === 0) {
+          setHasMore(false);
+          console.log('[MediaListScreen] No more items returned');
+        } else {
+          console.log(`[MediaListScreen] Loaded ${newTotalLoaded}/${totalItemsInLibrary} items`);
+        }
+      }
       
       setMediaItems(prev => isInitialLoad ? items : [...prev, ...items]);
       setOffset(currentOffset + items.length);
 
     } catch (err) {
-      setError("Failed to fetch media.");
+      console.error('[MediaListScreen] Failed to fetch media:', err);
+      setError("Failed to fetch media. Please check your connection and try again.");
     } finally {
       if (isInitialLoad) setIsLoading(false);
       setIsLoadingMore(false);
@@ -132,13 +181,20 @@ export default function MediaListScreen({
       setFilterUnwatched(false);
   };
 
-  const handleLoadMore = () => fetchMediaItems(offset);
+  const handleLoadMore = useCallback(() => {
+    if (!isLoadingMore && hasMore && !loadingRef.current) {
+      console.log('[MediaListScreen] Loading more items from offset:', offset);
+      fetchMediaItems(offset);
+    }
+  }, [offset, isLoadingMore, hasMore]);
   
   const renderMediaItem = useCallback(({ item }: { item: PlexMediaBase }) => (
     <MediaItem item={item} onSelectMedia={onSelectMedia} />
   ), [onSelectMedia]);
 
   const renderFooter = () => (isLoadingMore ? <ActivityIndicator size="small" color="#e5a00d" style={styles.footerLoader} /> : null);
+  
+  const keyExtractor = useCallback((item: PlexMediaBase) => item.ratingKey, []);
 
   return (
     <View style={styles.container}>
@@ -186,13 +242,16 @@ export default function MediaListScreen({
         <FlatList
           data={mediaItems}
           renderItem={renderMediaItem}
-          keyExtractor={(item) => item.ratingKey}
+          keyExtractor={keyExtractor}
           numColumns={3}
           contentContainerStyle={styles.listContainer}
           onEndReached={handleLoadMore}
           onEndReachedThreshold={0.5}
           ListFooterComponent={renderFooter}
           initialNumToRender={18}
+          maxToRenderPerBatch={18}
+          windowSize={5}
+          removeClippedSubviews={true}
         />
       )}
     </View>
@@ -225,4 +284,3 @@ const styles = StyleSheet.create({
   mediaYear: { fontSize: 10, color: '#ccc', marginTop: 2 },
   footerLoader: { marginVertical: 20 },
 });
-

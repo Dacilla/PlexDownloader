@@ -2,7 +2,7 @@
  * Downloads Screen
  * Displays a list of all current and completed downloads with management options.
  */
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { StyleSheet, Text, View, Pressable, FlatList, Image, ActivityIndicator, Alert } from 'react-native';
 import { getAllDownloads, findOrphanedFiles, deleteOrphanedFile, OrphanedFile, clearThumbnailCache } from '../database/operations';
 import { DownloadRecord, DownloadStatus } from '../database/schema';
@@ -12,36 +12,36 @@ import StorageInfo from '../components/StorageInfo';
 import downloadService from '../services/downloadService';
 import { formatBytes } from '../utils/formatters';
 
+const REFRESH_INTERVAL_MS = 2000;
+const STALL_THRESHOLD_MS = 8000;
+
 const ActionButton = ({ text, onPress, style, disabled }: { text: string, onPress: () => void, style?: any, disabled?: boolean }) => (
     <Pressable onPress={onPress} style={[styles.actionButton, style, disabled && styles.disabledButton]} disabled={disabled}>
         <Text style={styles.actionButtonText}>{text}</Text>
     </Pressable>
 );
 
-const DownloadItem = React.memo(({ item, onPause, onResume, onDelete }: { item: DownloadRecord, onPause: (id: number) => void, onResume: (id: number) => void, onDelete: (item: DownloadRecord) => void }) => {
+interface DownloadSpeed {
+  speed: number;
+  stalled: boolean;
+}
+
+const DownloadItem = React.memo(({ 
+  item, 
+  speedInfo,
+  onPause, 
+  onResume, 
+  onDelete 
+}: { 
+  item: DownloadRecord, 
+  speedInfo: DownloadSpeed,
+  onPause: (id: number) => void, 
+  onResume: (id: number) => void, 
+  onDelete: (item: DownloadRecord) => void 
+}) => {
     const media: PlexMovie | PlexEpisode = JSON.parse(item.cached_metadata_json);
     const title = media.type === 'movie' ? media.title : `${media.grandparentTitle} - S${media.parentIndex}E${media.index}`;
     const progress = (item.file_size && item.downloaded_bytes > 0) ? (item.downloaded_bytes / item.file_size) * 100 : 0;
-    
-    const [speedInfo, setSpeedInfo] = useState({ speed: 0, stalled: false });
-    const lastState = useRef({ bytes: item.downloaded_bytes, time: Date.now() });
-
-    useEffect(() => {
-        if (item.download_status === DownloadStatus.DOWNLOADING) {
-            const now = Date.now();
-            const timeDiff = (now - lastState.current.time) / 1000;
-            const byteDiff = item.downloaded_bytes - lastState.current.bytes;
-            
-            if (timeDiff > 0 && byteDiff > 0) {
-                setSpeedInfo({ speed: byteDiff / timeDiff, stalled: false });
-            } else if (timeDiff > 3.5) {
-                setSpeedInfo(s => ({ ...s, stalled: true, speed: 0 }));
-            }
-            lastState.current = { bytes: item.downloaded_bytes, time: now };
-        } else {
-            setSpeedInfo({ speed: 0, stalled: false });
-        }
-    }, [item.downloaded_bytes, item.download_status]);
 
     return (
         <View style={styles.itemContainer}>
@@ -56,7 +56,9 @@ const DownloadItem = React.memo(({ item, onPause, onResume, onDelete }: { item: 
                         <View style={styles.progressDetails}>
                             <Text style={styles.progressText}>{formatBytes(item.downloaded_bytes)} / {formatBytes(item.file_size || 0)}</Text>
                             {item.download_status === DownloadStatus.DOWNLOADING && (
-                                <Text style={styles.speedText}>{speedInfo.stalled ? 'Stalled' : `${formatBytes(speedInfo.speed)}/s`}</Text>
+                                <Text style={[styles.speedText, speedInfo.stalled && styles.stalledText]}>
+                                  {speedInfo.stalled ? 'Stalled' : `${formatBytes(speedInfo.speed)}/s`}
+                                </Text>
                             )}
                         </View>
                     </>
@@ -109,7 +111,7 @@ const ListHeader = React.memo(({ isScanning, isClearingCache, orphanedFiles, onS
                     <Text style={styles.sectionTitle}>Orphaned Files Found</Text>
                     {orphanedFiles.map(orphan => (
                         <View key={orphan.uri} style={styles.itemContainer}>
-                            <View style={[styles.thumbnail, styles.orphanIcon]}><Text>🗑️</Text></View>
+                            <View style={[styles.thumbnail, styles.orphanIcon]}><Text style={styles.orphanEmoji}>🗑️</Text></View>
                             <View style={styles.itemDetails}>
                                 <Text style={styles.itemTitle} numberOfLines={3}>{orphan.uri.split('/').pop()}</Text>
                                 <Text style={styles.statusText}>Size: {formatBytes(orphan.size)}</Text>
@@ -124,13 +126,15 @@ const ListHeader = React.memo(({ isScanning, isClearingCache, orphanedFiles, onS
     );
 });
 
-
 export default function DownloadsScreen({ onBack }: { onBack: () => void }) {
   const [downloads, setDownloads] = useState<DownloadRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isScanning, setIsScanning] = useState(false);
   const [orphanedFiles, setOrphanedFiles] = useState<OrphanedFile[]>([]);
   const [isClearingCache, setIsClearingCache] = useState(false);
+  
+  const downloadSpeedsRef = useRef<Map<number, { bytes: number, time: number }>>(new Map());
+  const intervalIdRef = useRef<NodeJS.Timeout | null>(null);
 
   const fetchAndSetDownloads = useCallback(async () => {
     try {
@@ -145,12 +149,71 @@ export default function DownloadsScreen({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     fetchAndSetDownloads();
-    const intervalId = setInterval(fetchAndSetDownloads, 1500);
-    return () => clearInterval(intervalId);
+    
+    const hasActiveDownloads = () => downloads.some(d => d.download_status === DownloadStatus.DOWNLOADING);
+    
+    if (hasActiveDownloads() || downloads.length === 0) {
+      intervalIdRef.current = setInterval(fetchAndSetDownloads, REFRESH_INTERVAL_MS);
+    } else if (intervalIdRef.current) {
+      clearInterval(intervalIdRef.current);
+      intervalIdRef.current = null;
+    }
+    
+    return () => {
+      if (intervalIdRef.current) {
+        clearInterval(intervalIdRef.current);
+      }
+    };
+  }, [fetchAndSetDownloads, downloads]);
+  
+  const downloadSpeeds = useMemo(() => {
+    const speeds = new Map<number, DownloadSpeed>();
+    const now = Date.now();
+    
+    downloads.forEach(download => {
+      if (download.download_status === DownloadStatus.DOWNLOADING) {
+        const lastState = downloadSpeedsRef.current.get(download.id);
+        
+        if (!lastState) {
+          downloadSpeedsRef.current.set(download.id, { bytes: download.downloaded_bytes, time: now });
+          speeds.set(download.id, { speed: 0, stalled: false });
+          return;
+        }
+        
+        const timeDiff = (now - lastState.time) / 1000;
+        const byteDiff = download.downloaded_bytes - lastState.bytes;
+        
+        if (byteDiff > 0) {
+          const currentSpeed = byteDiff / timeDiff;
+          speeds.set(download.id, { speed: currentSpeed, stalled: false });
+          downloadSpeedsRef.current.set(download.id, { bytes: download.downloaded_bytes, time: now });
+        } else if (timeDiff > STALL_THRESHOLD_MS / 1000) {
+          speeds.set(download.id, { speed: 0, stalled: true });
+        } else {
+          speeds.set(download.id, { speed: 0, stalled: false });
+        }
+      } else {
+        speeds.set(download.id, { speed: 0, stalled: false });
+        downloadSpeedsRef.current.delete(download.id);
+      }
+    });
+    
+    return speeds;
+  }, [downloads]);
+  
+  const handlePause = useCallback(async (id: number) => {
+    await downloadService.pauseDownload(id);
+    await fetchAndSetDownloads();
   }, [fetchAndSetDownloads]);
   
-  const handlePause = useCallback((id: number) => downloadService.pauseDownload(id).then(fetchAndSetDownloads), [fetchAndSetDownloads]);
-  const handleResume = useCallback((id: number) => downloadService.resumeDownload(id).then(fetchAndSetDownloads), [fetchAndSetDownloads]);
+  const handleResume = useCallback(async (id: number) => {
+    try {
+      await downloadService.resumeDownload(id);
+      await fetchAndSetDownloads();
+    } catch (error) {
+      Alert.alert('Resume Failed', error instanceof Error ? error.message : 'Could not resume download');
+    }
+  }, [fetchAndSetDownloads]);
 
   const handleDelete = useCallback((item: DownloadRecord) => {
     const title = item.download_status === DownloadStatus.COMPLETED ? "Confirm Deletion" : "Confirm Cancellation";
@@ -160,7 +223,10 @@ export default function DownloadsScreen({ onBack }: { onBack: () => void }) {
 
     Alert.alert(title, message, [
       { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => downloadService.cancelAndDeleteDownload(item.id).then(fetchAndSetDownloads) }
+      { text: "Delete", style: "destructive", onPress: async () => {
+        await downloadService.cancelAndDeleteDownload(item.id);
+        await fetchAndSetDownloads();
+      }}
     ]);
   }, [fetchAndSetDownloads]);
   
@@ -208,16 +274,24 @@ export default function DownloadsScreen({ onBack }: { onBack: () => void }) {
     }
   }, []);
   
-  const renderItem = useCallback(({item}) => (
-    <DownloadItem item={item} onPause={handlePause} onResume={handleResume} onDelete={handleDelete} />
-  ), [handlePause, handleResume, handleDelete]);
+  const renderItem = useCallback(({item}: {item: DownloadRecord}) => (
+    <DownloadItem 
+      item={item} 
+      speedInfo={downloadSpeeds.get(item.id) || { speed: 0, stalled: false }}
+      onPause={handlePause} 
+      onResume={handleResume} 
+      onDelete={handleDelete} 
+    />
+  ), [downloadSpeeds, handlePause, handleResume, handleDelete]);
+
+  const keyExtractor = useCallback((item: DownloadRecord) => item.id.toString(), []);
 
   return (
     <View style={styles.container}>
       <FlatList
         data={downloads}
         renderItem={renderItem}
-        keyExtractor={(item) => item.id.toString()}
+        keyExtractor={keyExtractor}
         ListHeaderComponent={<ListHeader isScanning={isScanning} isClearingCache={isClearingCache} orphanedFiles={orphanedFiles} onScan={handleScanForOrphans} onClearCache={handleClearCache} onDeleteOrphan={handleDeleteOrphan} />}
         ListEmptyComponent={!isLoading ? <Text style={styles.emptyText}>You have no downloads.</Text> : null}
         contentContainerStyle={{ paddingBottom: 100 }}
@@ -246,6 +320,7 @@ const styles = StyleSheet.create({
   progressDetails: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 4, marginBottom: 8 },
   progressText: { fontSize: 12, color: '#ccc' },
   speedText: { fontSize: 12, color: '#28a745', fontWeight: 'bold' },
+  stalledText: { color: '#ffc107' },
   controlsRow: { flexDirection: 'row', marginTop: 10, flexWrap: 'wrap' },
   actionButton: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 5, marginRight: 10, marginBottom: 5 },
   actionButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
@@ -265,5 +340,5 @@ const styles = StyleSheet.create({
   infoButton: { marginLeft: 10, backgroundColor: '#555', width: 30, height: 30, borderRadius: 15, justifyContent: 'center', alignItems: 'center' },
   infoButtonText: { color: '#fff', fontWeight: 'bold' },
   orphanIcon: { justifyContent: 'center', alignItems: 'center' },
+  orphanEmoji: { fontSize: 24 },
 });
-
