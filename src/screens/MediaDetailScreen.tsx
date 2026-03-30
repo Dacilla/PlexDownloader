@@ -3,8 +3,8 @@
  * Shows detailed information about a media item and download options.
  */
 import React, { useState, useEffect, useMemo } from 'react';
-import { StyleSheet, Text, View, Pressable, ScrollView, ActivityIndicator, Image, Dimensions } from 'react-native';
-import { PlexServer, PlexMediaBase, PlexMovie } from '../types/plex';
+import { StyleSheet, Text, View, Pressable, ScrollView, ActivityIndicator, Image, Dimensions, Modal } from 'react-native';
+import { PlexServer, PlexMediaBase, PlexMovie, TranscodeQuality } from '../types/plex';
 import plexClient from '../api/plexClient';
 import { formatBytes } from '../utils/formatters';
 import StorageInfo from '../components/StorageInfo';
@@ -14,7 +14,7 @@ interface MediaDetailScreenProps {
   activeServer: PlexServer;
   selectedMedia: PlexMediaBase;
   onBack: () => void;
-  onDownload: () => void;
+  onDownload: (quality: TranscodeQuality) => void;
 }
 
 const { width } = Dimensions.get('window');
@@ -29,6 +29,7 @@ export default function MediaDetailScreen({
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [freeSpace, setFreeSpace] = useState<number | null>(null);
+  const [showQualityModal, setShowQualityModal] = useState(false);
 
   useEffect(() => {
     fetchMediaDetails();
@@ -86,6 +87,15 @@ export default function MediaDetailScreen({
     }
   };
 
+  const handleDownloadPress = () => {
+    setShowQualityModal(true);
+  };
+
+  const handleQualitySelect = (quality: TranscodeQuality) => {
+    setShowQualityModal(false);
+    onDownload(quality);
+  };
+
   if (isLoading) {
     return (
       <View style={styles.container}>
@@ -109,42 +119,81 @@ export default function MediaDetailScreen({
   const hasEnoughSpace = freeSpace !== null && freeSpace > mediaSize;
 
   return (
-    <ScrollView style={styles.scrollView}>
-      <View style={styles.headerImageContainer}>
-        <Image
-          source={{ uri: headerImageUrl }}
-          style={styles.headerImage}
-          resizeMode="cover"
-        />
-        <View style={styles.overlay} />
-        <Pressable style={styles.backButtonContainer} onPress={onBack}>
-          <Text style={styles.backButtonText}>{'< Back'}</Text>
-        </Pressable>
-        <View style={styles.headerTextContainer}>
-          <Text style={styles.title}>{details.title}</Text>
-          <Text style={styles.subtitle}>{details.year} • {Math.round(details.duration / 60000)} min</Text>
-        </View>
-      </View>
-
-      <View style={styles.contentContainer}>
-        <Text style={styles.summary}>{details.summary}</Text>
-        <View style={styles.downloadSection}>
-          <Text style={styles.downloadHeader}>Storage & Download</Text>
-          <StorageInfo />
-          <Pressable
-            style={({ pressed }) => [styles.downloadButton, !hasEnoughSpace && styles.disabledButton, pressed && hasEnoughSpace && styles.buttonPressed]}
-            onPress={onDownload}
-            disabled={!hasEnoughSpace}
-          >
-            <Text style={styles.downloadButtonText}>Download Original Quality</Text>
-            <Text style={styles.downloadButtonSubtitle}>Size: {formatBytes(mediaSize)}</Text>
+    <View style={styles.container}>
+      <ScrollView style={styles.scrollView}>
+        <View style={styles.headerImageContainer}>
+          <Image
+            source={{ uri: headerImageUrl }}
+            style={styles.headerImage}
+            resizeMode="cover"
+          />
+          <View style={styles.overlay} />
+          <Pressable style={styles.backButtonContainer} onPress={onBack}>
+            <Text style={styles.backButtonText}>{'< Back'}</Text>
           </Pressable>
-          {storageWarningMessage && (
-             <Text style={styles.storageWarning}>{storageWarningMessage}</Text>
-          )}
+          <View style={styles.headerTextContainer}>
+            <Text style={styles.title}>{details.title}</Text>
+            <Text style={styles.subtitle}>{details.year} • {Math.round(details.duration / 60000)} min</Text>
+          </View>
         </View>
-      </View>
-    </ScrollView>
+
+        <View style={styles.contentContainer}>
+          <Text style={styles.summary}>{details.summary}</Text>
+          <View style={styles.downloadSection}>
+            <Text style={styles.downloadHeader}>Storage & Download</Text>
+            <StorageInfo />
+            <Pressable
+              style={({ pressed }) => [styles.downloadButton, !hasEnoughSpace && styles.disabledButton, pressed && hasEnoughSpace && styles.buttonPressed]}
+              onPress={handleDownloadPress}
+              disabled={!hasEnoughSpace}
+            >
+              <Text style={styles.downloadButtonText}>Download</Text>
+              <Text style={styles.downloadButtonSubtitle}>Select Quality</Text>
+            </Pressable>
+            {storageWarningMessage && (
+               <Text style={styles.storageWarning}>{storageWarningMessage}</Text>
+            )}
+          </View>
+        </View>
+      </ScrollView>
+
+      <Modal
+        animationType="slide"
+        transparent={true}
+        visible={showQualityModal}
+        onRequestClose={() => setShowQualityModal(false)}
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Select Download Quality</Text>
+            
+            <Pressable style={styles.qualityOption} onPress={() => handleQualitySelect(TranscodeQuality.ORIGINAL)}>
+              <Text style={styles.qualityTitle}>Original Quality</Text>
+              <Text style={styles.qualitySubtitle}>Direct Play • {formatBytes(mediaSize)}</Text>
+            </Pressable>
+
+            <Pressable style={styles.qualityOption} onPress={() => handleQualitySelect(TranscodeQuality.HIGH_1080P)}>
+              <Text style={styles.qualityTitle}>High (1080p)</Text>
+              <Text style={styles.qualitySubtitle}>10 Mbps • Transcoded</Text>
+            </Pressable>
+
+            <Pressable style={styles.qualityOption} onPress={() => handleQualitySelect(TranscodeQuality.MEDIUM_720P)}>
+              <Text style={styles.qualityTitle}>Medium (720p)</Text>
+              <Text style={styles.qualitySubtitle}>4 Mbps • Transcoded</Text>
+            </Pressable>
+
+            <Pressable style={styles.qualityOption} onPress={() => handleQualitySelect(TranscodeQuality.LOW_480P)}>
+              <Text style={styles.qualityTitle}>Low (480p)</Text>
+              <Text style={styles.qualitySubtitle}>1.5 Mbps • Transcoded</Text>
+            </Pressable>
+
+            <Pressable style={styles.cancelButton} onPress={() => setShowQualityModal(false)}>
+              <Text style={styles.cancelButtonText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+    </View>
   );
 }
 
@@ -152,8 +201,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#1a1a1a',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   scrollView: {
     flex: 1,
@@ -263,5 +310,49 @@ const styles = StyleSheet.create({
     color: '#4f8fcf',
     fontSize: 16,
     marginTop: 20,
+  },
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  modalContent: {
+    backgroundColor: '#2a2a2a',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    paddingBottom: 40,
+  },
+  modalTitle: {
+    color: '#ffffff',
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 20,
+    textAlign: 'center',
+  },
+  qualityOption: {
+    paddingVertical: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  qualityTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  qualitySubtitle: {
+    color: '#aaaaaa',
+    fontSize: 14,
+    marginTop: 2,
+  },
+  cancelButton: {
+    marginTop: 20,
+    alignItems: 'center',
+    paddingVertical: 15,
+  },
+  cancelButtonText: {
+    color: '#ff4444',
+    fontSize: 16,
+    fontWeight: 'bold',
   },
 });

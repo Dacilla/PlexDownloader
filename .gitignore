@@ -40,3 +40,4 @@ yarn-error.*
 /ios
 /android
 *repomix*
+package-lock.json

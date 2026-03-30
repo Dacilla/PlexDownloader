@@ -169,7 +169,7 @@ export default function MediaListScreen({
       setSortDirection(current => current === 'asc' ? 'desc' : 'asc');
     } else {
       setSortOption(newSortOption);
-      setSortDirection(SORT_OPTIONS[newSortOption].defaultDir);
+      setSortDirection(SORT_OPTIONS[newSortOption].defaultDir as 'asc' | 'desc');
     }
   };
   

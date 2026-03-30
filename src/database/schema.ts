@@ -7,7 +7,7 @@
 import * as SQLite from 'expo-sqlite';
 
 let db: SQLite.SQLiteDatabase | null = null;
-const CURRENT_DB_VERSION = 3; // Bump version for resume_data column
+const CURRENT_DB_VERSION = 4; // Bump version for queue fields
 
 /**
  * Initialize the database, create tables, and run migrations.
@@ -39,7 +39,7 @@ async function createTables(db: SQLite.SQLiteDatabase) {
         local_file_path TEXT NOT NULL,
         cached_metadata_json TEXT NOT NULL,
         local_thumbnail_path TEXT,
-        download_status TEXT NOT NULL CHECK(download_status IN ('pending', 'downloading', 'paused', 'completed', 'failed')),
+        download_status TEXT NOT NULL CHECK(download_status IN ('pending', 'downloading', 'paused', 'completed', 'failed', 'preparing')),
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         file_size INTEGER,
@@ -47,6 +47,8 @@ async function createTables(db: SQLite.SQLiteDatabase) {
         error_message TEXT,
         quality_profile TEXT,
         resume_data TEXT,
+        queue_id INTEGER,
+        queue_item_id INTEGER,
         UNIQUE(media_rating_key, server_identifier)
       );
     `);
@@ -99,6 +101,23 @@ async function runMigrations(db: SQLite.SQLiteDatabase) {
     await db.runAsync('UPDATE db_version SET version = ?', 3);
     currentVersion = 3;
   }
+
+  if (currentVersion < 4) {
+    try {
+      await db.execAsync('ALTER TABLE downloads ADD COLUMN quality_profile TEXT;');
+    } catch (e) {
+      console.warn("Column 'quality_profile' might already exist.");
+    }
+    try {
+      await db.execAsync('ALTER TABLE downloads ADD COLUMN queue_id INTEGER;');
+    } catch (e) { console.warn("Column 'queue_id' might already exist."); }
+    try {
+      await db.execAsync('ALTER TABLE downloads ADD COLUMN queue_item_id INTEGER;');
+    } catch (e) { console.warn("Column 'queue_item_id' might already exist."); }
+    
+    await db.runAsync('UPDATE db_version SET version = ?', 4);
+    currentVersion = 4;
+  }
 }
 
 export function getDatabase(): SQLite.SQLiteDatabase {
@@ -114,6 +133,7 @@ export enum DownloadStatus {
   PAUSED = 'paused',
   COMPLETED = 'completed',
   FAILED = 'failed',
+  PREPARING = 'preparing', // New status for transcoding
 }
 
 export interface DownloadRecord {
@@ -131,6 +151,8 @@ export interface DownloadRecord {
   error_message: string | null;
   quality_profile: string | null;
   resume_data: string | null;
+  queue_id: number | null;
+  queue_item_id: number | null;
 }
 
 export interface ServerRecord {
@@ -142,4 +164,3 @@ export interface ServerRecord {
   last_connected: number | null;
   cached_metadata_json: string | null;
 }
-

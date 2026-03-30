@@ -5,6 +5,7 @@
 
 import * as FileSystem from 'expo-file-system/legacy';
 import { getDatabase, DownloadRecord, ServerRecord, DownloadStatus } from './schema';
+export { ServerRecord };
 
 
 export async function saveServer(server: Omit<ServerRecord, 'last_connected'>): Promise<void> {
@@ -37,16 +38,24 @@ export async function addDownload(params: {
   localFilePath: string;
   metadataJson: string;
   localThumbnailPath: string | null;
+  qualityProfile?: string | null;
+  queueId?: number | null;
+  queueItemId?: number | null;
+  downloadStatus?: DownloadStatus;
 }): Promise<number> {
-  const { mediaRatingKey, serverIdentifier, localFilePath, metadataJson, localThumbnailPath } = params;
+  const { 
+    mediaRatingKey, serverIdentifier, localFilePath, metadataJson, localThumbnailPath,
+    qualityProfile, queueId, queueItemId, downloadStatus = DownloadStatus.PENDING
+  } = params;
+  
   const db = getDatabase();
   const now = Date.now();
 
   const result = await db.runAsync(
     `INSERT INTO downloads 
-     (media_rating_key, server_identifier, local_file_path, cached_metadata_json, local_thumbnail_path, download_status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [mediaRatingKey, serverIdentifier, localFilePath, metadataJson, localThumbnailPath, DownloadStatus.PENDING, now, now]
+     (media_rating_key, server_identifier, local_file_path, cached_metadata_json, local_thumbnail_path, download_status, created_at, updated_at, quality_profile, queue_id, queue_item_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [mediaRatingKey, serverIdentifier, localFilePath, metadataJson, localThumbnailPath, downloadStatus, now, now, qualityProfile || null, queueId || null, queueItemId || null]
   );
 
   return result.lastInsertRowId;

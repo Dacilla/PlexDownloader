@@ -8,10 +8,11 @@ import { StyleSheet, Text, View, ActivityIndicator, Pressable, Alert } from 'rea
 import { StatusBar } from 'expo-status-bar';
 
 import { initializeDatabase } from './src/database/schema';
-import { getAppState, setAppState } from './src/database/operations';
+import { getAppState, setAppState as setStoredAppState } from './src/database/operations';
 import plexClient from './src/api/plexClient';
 import downloadService from './src/services/downloadService';
-import { PlexServer, PlexLibrary, PlexMediaBase, PlexMovie, PlexEpisode } from './src/types/plex';
+import { PlexServer, PlexLibrary, PlexMediaBase, PlexMovie, PlexEpisode, TranscodeQuality } from './src/types/plex';
+import { DownloadRecord } from './src/database/schema';
 
 import AuthScreen from './src/screens/AuthScreen';
 import ServerListScreen from './src/screens/ServerListScreen';
@@ -19,6 +20,7 @@ import LibraryBrowserScreen from './src/screens/LibraryBrowserScreen';
 import MediaListScreen from './src/screens/MediaListScreen';
 import MediaDetailScreen from './src/screens/MediaDetailScreen';
 import DownloadsScreen from './src/screens/DownloadsScreen';
+import PlayerScreen from './src/screens/PlayerScreen';
 import Toast from './src/components/Toast';
 
 enum AppState { LOADING, NEEDS_AUTH, AUTHENTICATED, ERROR }
@@ -83,6 +85,8 @@ function AppContent() {
   const [selectedMedia, setSelectedMedia] = useState<PlexMediaBase | null>(null);
   const [isViewingDownloads, setIsViewingDownloads] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [isPlayingMedia, setIsPlayingMedia] = useState(false);
+  const [mediaToPlay, setMediaToPlay] = useState<{ uri: string, title: string } | null>(null);
 
   useEffect(() => {
     initializeApp();
@@ -128,7 +132,7 @@ function AppContent() {
   const handleAuthSuccess = async (token: string) => {
     console.log('[App] Authentication successful');
     plexClient.setUserToken(token);
-    await setAppState('plexUserAuthToken', token);
+    await setStoredAppState('plexUserAuthToken', token);
     setAppState(AppState.AUTHENTICATED);
   };
 
@@ -144,7 +148,7 @@ function AppContent() {
           text: 'Log Out',
           style: 'destructive',
           onPress: async () => {
-            await setAppState('plexUserAuthToken', null);
+            await setStoredAppState('plexUserAuthToken', null);
             plexClient.setUserToken('');
             plexClient.clearActiveServer();
             setActiveServer(null);
@@ -159,7 +163,7 @@ function AppContent() {
 
   const handleServerSelect = (server: PlexServer) => {
     console.log('[App] Server selected:', server.name);
-    plexClient.setActiveServer(server);
+    // plexClient is already initialized by ServerListScreen
     setActiveServer(server);
   };
   
@@ -173,7 +177,7 @@ function AppContent() {
     setSelectedMedia(media);
   };
 
-  const handleDownload = async () => {
+  const handleDownload = async (quality: TranscodeQuality) => {
     if (!activeServer || !selectedMedia) {
       showToast('Error: No server or media selected.');
       return;
@@ -186,10 +190,11 @@ function AppContent() {
     }
     
     try {
-      console.log('[App] Starting download for:', selectedMedia.title);
+      console.log(`[App] Starting download for: ${selectedMedia.title} with quality: ${quality}`);
       await downloadService.startDownload({
         serverIdentifier: activeServer.machineIdentifier,
-        media: selectedMedia as PlexMovie | PlexEpisode
+        media: selectedMedia as PlexMovie | PlexEpisode,
+        qualityProfile: quality
       });
       showToast('Added to downloads!');
     } catch (error) {
@@ -218,6 +223,27 @@ function AppContent() {
     setSelectedMedia(null);
   };
 
+  const handlePlayDownloadedMedia = (item: DownloadRecord) => {
+    if (item.local_file_path) {
+      const media = JSON.parse(item.cached_metadata_json);
+      const title = media.type === 'movie' ? media.title : `${media.grandparentTitle} - S${media.parentIndex}E${media.index}`;
+      
+      setMediaToPlay({
+        uri: item.local_file_path,
+        title: title
+      });
+      setIsPlayingMedia(true);
+    } else {
+      console.error('No local file path for download:', item.id);
+      showToast('Error: File not found on device');
+    }
+  };
+
+  const handleClosePlayer = () => {
+    setIsPlayingMedia(false);
+    setMediaToPlay(null);
+  };
+
   const renderContent = () => {
     if (appState === AppState.LOADING) {
       return <View style={styles.container}><ActivityIndicator size="large" color="#e5a00d" /><Text style={styles.loadingText}>Initializing...</Text></View>;
@@ -236,9 +262,19 @@ function AppContent() {
     if (appState === AppState.NEEDS_AUTH) {
       return <AuthScreen onAuthenticationSuccess={handleAuthSuccess} />;
     }
+
+    if (isPlayingMedia && mediaToPlay) {
+      return (
+        <PlayerScreen 
+          source={mediaToPlay.uri} 
+          title={mediaToPlay.title} 
+          onClose={handleClosePlayer} 
+        />
+      );
+    }
     
     if (isViewingDownloads) {
-      return <DownloadsScreen onBack={() => setIsViewingDownloads(false)} />;
+      return <DownloadsScreen onBack={() => setIsViewingDownloads(false)} onPlay={handlePlayDownloadedMedia} />;
     }
     
     let browserContent;

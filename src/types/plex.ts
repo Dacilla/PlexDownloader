@@ -149,33 +149,63 @@ export interface PlexStream {
   height?: number; // for video
 }
 
-// Download Queue types (Section 3.4 of design doc)
+// Download Queue types (Based on Official API)
 export interface DownloadQueue {
-  id: string;
-  clientIdentifier: string;
-  createdAt: number;
+  id: number;
+  status: string;
+  itemCount: number;
 }
 
 export interface DownloadQueueItem {
-  id: string;
-  mediaRatingKey: string;
-  status: 'pending' | 'transcoding' | 'available' | 'failed';
-  progress: number; // 0-100
-  size?: number;
+  id: number;
+  queueId: number;
+  key: string;
+  status: string; // 'available', 'pending', 'transcoding', etc.
+  DecisionResult?: {
+    generalDecisionCode: number;
+    generalDecisionText: string;
+    directPlayDecisionCode: number;
+    directPlayDecisionText: string;
+  };
   error?: string;
-  addedAt: number;
-  updatedAt: number;
 }
 
 export interface DownloadQueueAddParams {
-  uri: string; // Plex URI for the media item
-  videoBitrate?: number;
+  keys: string; // Comma-separated list of keys (e.g., "/library/metadata/123")
   videoResolution?: string; // e.g., "1920x1080"
-  audioBoost?: number;
-  subtitleSize?: number;
+  videoBitrate?: number; // kbps
+  videoQuality?: number; // 0-100
+  subtitleSize?: number; // 100 = original
+  audioBoost?: number; // 100 = original
   mediaIndex?: number;
   partIndex?: number;
 }
+
+export enum TranscodeQuality {
+  ORIGINAL = 'Original',
+  HIGH_1080P = '1080p (10 Mbps)',
+  MEDIUM_720P = '720p (4 Mbps)',
+  LOW_480P = '480p (1.5 Mbps)',
+}
+
+export const QUALITY_PROFILES: Record<TranscodeQuality, Partial<DownloadQueueAddParams>> = {
+  [TranscodeQuality.ORIGINAL]: {}, // Direct Play / Stream
+  [TranscodeQuality.HIGH_1080P]: {
+    videoResolution: '1920x1080',
+    videoBitrate: 10000,
+    videoQuality: 100,
+  },
+  [TranscodeQuality.MEDIUM_720P]: {
+    videoResolution: '1280x720',
+    videoBitrate: 4000,
+    videoQuality: 75,
+  },
+  [TranscodeQuality.LOW_480P]: {
+    videoResolution: '720x480',
+    videoBitrate: 1500,
+    videoQuality: 60,
+  },
+};
 
 // Server status types
 export interface PlexSession {

@@ -1,9 +1,8 @@
-/**
- * Downloads Screen
- * Displays a list of all current and completed downloads with management options.
- */
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { StyleSheet, Text, View, Pressable, FlatList, Image, ActivityIndicator, Alert } from 'react-native';
+import { StyleSheet, Text, View, Pressable, FlatList, Image, ActivityIndicator, Alert, Platform } from 'react-native';
+import { shareAsync } from 'expo-sharing';
+import { getContentUriAsync } from 'expo-file-system/legacy';
+import * as IntentLauncher from 'expo-intent-launcher';
 import { getAllDownloads, findOrphanedFiles, deleteOrphanedFile, OrphanedFile, clearThumbnailCache } from '../database/operations';
 import { DownloadRecord, DownloadStatus } from '../database/schema';
 import { PlexMovie, PlexEpisode } from '../types/plex';
@@ -31,25 +30,46 @@ const DownloadItem = React.memo(({
   speedInfo,
   onPause, 
   onResume, 
-  onDelete 
+  onDelete,
+  onPlay,
+  onOpenExternal
 }: { 
   item: DownloadRecord, 
   speedInfo: DownloadSpeed,
   onPause: (id: number) => void, 
   onResume: (id: number) => void, 
-  onDelete: (item: DownloadRecord) => void 
+  onDelete: (item: DownloadRecord) => void,
+  onPlay: (item: DownloadRecord) => void,
+  onOpenExternal: (item: DownloadRecord) => void
 }) => {
     const media: PlexMovie | PlexEpisode = JSON.parse(item.cached_metadata_json);
     const title = media.type === 'movie' ? media.title : `${media.grandparentTitle} - S${media.parentIndex}E${media.index}`;
     const progress = (item.file_size && item.downloaded_bytes > 0) ? (item.downloaded_bytes / item.file_size) * 100 : 0;
 
+    // Format quality label
+    const qualityLabel = item.quality_profile ? item.quality_profile.replace('plex_downloader_', '').replace('_', ' ').toUpperCase() : 'ORIGINAL';
+
     return (
         <View style={styles.itemContainer}>
-            <Image source={{ uri: item.local_thumbnail_path || undefined }} style={styles.thumbnail} />
+            <Pressable 
+              onPress={() => item.download_status === DownloadStatus.COMPLETED && onPlay(item)}
+              disabled={item.download_status !== DownloadStatus.COMPLETED}
+            >
+              <Image source={{ uri: item.local_thumbnail_path || undefined }} style={styles.thumbnail} />
+            </Pressable>
             <View style={styles.itemDetails}>
                 <Text style={styles.itemTitle} numberOfLines={2}>{title}</Text>
-                <Text style={styles.statusText}>Status: {item.download_status}</Text>
+                <Text style={styles.statusText}>
+                    Status: {item.download_status} • {qualityLabel}
+                </Text>
                 
+                {item.download_status === DownloadStatus.PREPARING && (
+                    <View style={styles.progressDetails}>
+                        <ActivityIndicator size="small" color="#e5a00d" style={{ marginRight: 10 }} />
+                        <Text style={styles.progressText}>Transcoding on server...</Text>
+                    </View>
+                )}
+
                 {(item.download_status === DownloadStatus.DOWNLOADING || item.download_status === DownloadStatus.PAUSED) && (
                     <>
                         <ProgressBar progress={progress} />
@@ -66,6 +86,12 @@ const DownloadItem = React.memo(({
                 {item.download_status === DownloadStatus.COMPLETED && <Text style={styles.progressText}>{formatBytes(item.file_size || 0)} - Complete</Text>}
                 
                 <View style={styles.controlsRow}>
+                    {item.download_status === DownloadStatus.COMPLETED && (
+                        <>
+                            <ActionButton text="Play" onPress={() => onPlay(item)} style={styles.playButton} />
+                            <ActionButton text="Open External" onPress={() => onOpenExternal(item)} style={styles.externalButton} />
+                        </>
+                    )}
                     {item.download_status === DownloadStatus.DOWNLOADING && <ActionButton text="Pause" onPress={() => onPause(item.id)} style={styles.pauseButton}/>}
                     {(item.download_status === DownloadStatus.PAUSED || item.download_status === DownloadStatus.FAILED) && <ActionButton text="Resume" onPress={() => onResume(item.id)} style={styles.resumeButton} />}
                     <ActionButton text="Delete" onPress={() => onDelete(item)} style={styles.deleteButton} />
@@ -126,7 +152,7 @@ const ListHeader = React.memo(({ isScanning, isClearingCache, orphanedFiles, onS
     );
 });
 
-export default function DownloadsScreen({ onBack }: { onBack: () => void }) {
+export default function DownloadsScreen({ onBack, onPlay }: { onBack: () => void, onPlay: (item: DownloadRecord) => void }) {
   const [downloads, setDownloads] = useState<DownloadRecord[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isScanning, setIsScanning] = useState(false);
@@ -264,13 +290,36 @@ export default function DownloadsScreen({ onBack }: { onBack: () => void }) {
       ]
     );
   }, [fetchAndSetDownloads]);
-  
+
   const handleDeleteOrphan = useCallback(async (uri: string) => {
     try {
       await deleteOrphanedFile(uri);
       setOrphanedFiles(prev => prev.filter(f => f.uri !== uri));
     } catch (error) {
       Alert.alert("Error", `Failed to delete file: ${uri}`);
+    }
+  }, []);
+
+  const handleOpenExternal = useCallback(async (item: DownloadRecord) => {
+    if (item.local_file_path) {
+      try {
+        if (Platform.OS === 'android') {
+          const contentUri = await getContentUriAsync(item.local_file_path);
+          await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+            data: contentUri,
+            flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+            type: 'video/*',
+          });
+        } else {
+          await shareAsync(item.local_file_path, {
+            UTI: 'public.movie',
+            mimeType: 'video/mp4',
+          });
+        }
+      } catch (error) {
+        console.error('Error opening external player:', error);
+        Alert.alert('Error', 'Could not open file in external player.');
+      }
     }
   }, []);
   
@@ -281,8 +330,10 @@ export default function DownloadsScreen({ onBack }: { onBack: () => void }) {
       onPause={handlePause} 
       onResume={handleResume} 
       onDelete={handleDelete} 
+      onPlay={onPlay}
+      onOpenExternal={handleOpenExternal}
     />
-  ), [downloadSpeeds, handlePause, handleResume, handleDelete]);
+  ), [downloadSpeeds, handlePause, handleResume, handleDelete, onPlay, handleOpenExternal]);
 
   const keyExtractor = useCallback((item: DownloadRecord) => item.id.toString(), []);
 
@@ -326,6 +377,8 @@ const styles = StyleSheet.create({
   actionButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
   pauseButton: { backgroundColor: '#ffc107' },
   resumeButton: { backgroundColor: '#28a745' },
+  playButton: { backgroundColor: '#28a745' },
+  externalButton: { backgroundColor: '#17a2b8' },
   deleteButton: { backgroundColor: '#dc3545' },
   emptyText: { fontSize: 16, color: '#ccc', textAlign: 'center', marginVertical: 20 },
   footer: { position: 'absolute', bottom: 0, left: 20, right: 20, paddingBottom: 20, backgroundColor: '#1a1a1a' },

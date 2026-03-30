@@ -117,6 +117,11 @@ class PlexClient {
         return response;
       },
       (error) => {
+        // Check if we should skip logging for this request (e.g. connection testing)
+        if (error.config && (error.config as any).skipErrorLogging) {
+            return Promise.reject(error);
+        }
+
         const url = censorToken(error.config?.url);
         if (error.code === 'ECONNABORTED') {
           console.error('Request timeout:', url);
@@ -156,7 +161,7 @@ class PlexClient {
     if (!this.userTokenInfo) return true;
     return Date.now() > this.userTokenInfo.expiresAt;
   }
-  
+
   getActiveServerToken(): string | null {
     return this.activeServerToken;
   }
@@ -169,20 +174,31 @@ class PlexClient {
     this.imageUrlCache.clear();
   }
 
-  clearActiveServer(): void {
-    this.activeServer = null;
-    this.activeServerUrl = null;
-    this.activeServerDownloadUrl = null;
-    this.activeServerToken = null;
+  setActiveServerConnection(server: PlexServer, connectionUri: string): void {
+    this.activeServer = server;
+    this.activeServerUrl = connectionUri;
+    // For downloads, we ideally want a public IP, but if the user manually selected this connection,
+    // we should probably trust it for everything or try to derive a download URL from it.
+    // For now, let's set it as the download URL as well to be consistent with the manual override.
+    this.activeServerDownloadUrl = connectionUri;
+    this.activeServerToken = server.accessToken;
     this.imageUrlCache.clear();
+  }
+
+  getActiveServer(): PlexServer | null {
+    return this.activeServer;
   }
 
   getActiveServerUrl(): string | null {
     return this.activeServerUrl;
   }
-  
-  getActiveServer(): PlexServer | null {
-    return this.activeServer;
+
+  clearActiveServer(): void {
+    this.activeServer = null;
+    this.activeServerUrl = null;
+    this.activeServerToken = null;
+    this.activeServerDownloadUrl = null;
+    this.imageUrlCache.clear();
   }
 
   private getBestConnectionUri(connections: PlexConnection[], forDownload: boolean): string {
@@ -208,19 +224,57 @@ class PlexClient {
 
     return connections[0]?.uri || '';
   }
-  
-  async validateServerConnection(server: PlexServer): Promise<boolean> {
-    const testUrl = this.getBestConnectionUri(server.connections, false);
+
+  async testConnection(uri: string, token?: string): Promise<number | -1> {
+    const start = Date.now();
     try {
-      const response = await this.axiosInstance.get(`${testUrl}/`, {
+      // console.log(`[PlexClient] Testing connection: ${uri} (Token: ${token ? 'Yes' : 'No'})`);
+      const response = await this.axiosInstance.get(`${uri}/`, {
         timeout: 5000,
-        headers: { 'X-Plex-Token': server.accessToken }
+        headers: token ? { 'X-Plex-Token': token } : undefined,
+        // @ts-ignore - Custom config property to skip logging
+        skipErrorLogging: true,
       });
-      return response.status === 200;
-    } catch (error) {
-      console.error(`Failed to validate connection to ${testUrl}:`, error);
-      return false;
+      if (response.status === 200) {
+        const latency = Date.now() - start;
+        // console.log(`[PlexClient] Connection success: ${uri} (${latency}ms)`);
+        return latency;
+      }
+      console.warn(`[PlexClient] Connection failed (Status ${response.status}): ${uri}`);
+      return -1;
+    } catch (error: any) {
+      const msg = error.message || 'Unknown error';
+      console.warn(`[PlexClient] Connection test failed for ${uri}: ${msg}`);
+      return -1;
     }
+  }
+
+  async findBestConnection(connections: PlexConnection[], token?: string): Promise<{ uri: string, latency: number } | null> {
+    // Prioritize remote HTTPS, then remote HTTP, then local
+    // But actually test them all to find the fastest reachable one.
+    
+    // We'll test all unique URIs in parallel
+    const uniqueUris = Array.from(new Set(connections.map(c => c.uri)));
+    
+    const results = await Promise.all(uniqueUris.map(async uri => {
+      const latency = await this.testConnection(uri, token);
+      return { uri, latency };
+    }));
+    
+    const reachable = results.filter(r => r.latency !== -1);
+    
+    if (reachable.length === 0) return null;
+    
+    // Sort by latency
+    reachable.sort((a, b) => a.latency - b.latency);
+    
+    return reachable[0];
+  }
+
+  async validateServerConnection(server: PlexServer): Promise<boolean> {
+    // Try to find ANY working connection
+    const best = await this.findBestConnection(server.connections, server.accessToken);
+    return best !== null;
   }
   
   getTranscodedImageUrl(path: string, width: number, height: number): string | undefined {
@@ -338,6 +392,73 @@ class PlexClient {
     }
   
     return `${baseUrl}/library/parts/${partId}/${changestamp}/${encodeURIComponent(filename)}?X-Plex-Token=${this.activeServerToken}`;
+  }
+
+  // --- Download Queue API (Section 3.4) ---
+
+  /**
+   * Get or create a download queue for this client.
+   * POST /downloadQueue
+   */
+  async getOrCreateDownloadQueue(): Promise<{ id: number; status: string; itemCount: number }> {
+    if (!this.activeServerUrl) throw new Error("No active server configured.");
+    
+    // The client identifier is automatically added via interceptors
+    const response = await this.axiosInstance.post(`${this.activeServerUrl}/downloadQueue`);
+    
+    // The response structure is MediaContainer.DownloadQueue[0]
+    const container = response.data.MediaContainer;
+    console.log('[PlexClient] getOrCreateDownloadQueue response:', JSON.stringify(container, null, 2));
+    if (container.DownloadQueue && container.DownloadQueue.length > 0) {
+      return container.DownloadQueue[0];
+    }
+    throw new Error("Failed to get or create download queue.");
+  }
+
+  /**
+   * Add an item to the download queue.
+   * PUT /downloadQueue/{queueId}
+   */
+  async addToDownloadQueue(queueId: number, params: import('../types/plex').DownloadQueueAddParams): Promise<any> {
+    if (!this.activeServerUrl) throw new Error("No active server configured.");
+
+    const queryParams = new URLSearchParams();
+    queryParams.append('keys', params.keys);
+    if (params.videoResolution) queryParams.append('videoResolution', params.videoResolution);
+    if (params.videoBitrate) queryParams.append('videoBitrate', params.videoBitrate.toString());
+    if (params.videoQuality) queryParams.append('videoQuality', params.videoQuality.toString());
+   * GET /downloadQueue/{queueId}/items
+   */
+  async getDownloadQueueItems(queueId: number): Promise<import('../types/plex').DownloadQueueItem[]> {
+    if (!this.activeServerUrl) throw new Error("No active server configured.");
+
+    const response = await this.axiosInstance.get(`${this.activeServerUrl}/downloadQueue/${queueId}/items`);
+    return response.data.MediaContainer.DownloadQueueItem || [];
+  }
+
+  /**
+   * Get the direct download URL for a transcoded item in the queue.
+   * GET /downloadQueue/{queueId}/items/{itemId}/media
+   */
+  getDownloadQueueItemMediaUrl(queueId: number, itemId: number): string {
+    if (!this.activeServerUrl || !this.activeServerToken) {
+      throw new Error("No active server configured.");
+    }
+    
+    // Use the download URL if available (public IP), otherwise fallback to active URL
+    const baseUrl = this.activeServerDownloadUrl || this.activeServerUrl;
+    
+    return `${baseUrl}/downloadQueue/${queueId}/items/${itemId}/media?X-Plex-Token=${this.activeServerToken}`;
+  }
+
+  /**
+   * Delete an item from the download queue.
+   * DELETE /downloadQueue/{queueId}/items/{itemId}
+   */
+  async deleteDownloadQueueItem(queueId: number, itemId: number): Promise<void> {
+    if (!this.activeServerUrl) throw new Error("No active server configured.");
+
+    await this.axiosInstance.delete(`${this.activeServerUrl}/downloadQueue/${queueId}/items/${itemId}`);
   }
 }
 
